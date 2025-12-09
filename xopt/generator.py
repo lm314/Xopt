@@ -27,6 +27,8 @@ class Generator(XoptBaseModel, ABC):
         Flag that describes if this generator can generate batches of points.
     supports_multi_objective : bool
         Flag that describes if this generator can solve multi-objective problems.
+    supports_discrete_variables : bool
+        Flag that describes if this generator can handle discrete variable optimization problems.
     vocs : VOCS
         Generator VOCS.
     data : pd.DataFrame, optional
@@ -66,6 +68,13 @@ class Generator(XoptBaseModel, ABC):
         frozen=True,
         exclude=True,
     )
+    supports_discrete_variables: bool = Field(
+        default=False,
+        description="flag that describes if this generator handle discrete "
+        "variable optimization problems",
+        frozen=True,
+        exclude=True,
+    )
 
     vocs: VOCS = Field(description="generator VOCS", exclude=True)
     data: Optional[pd.DataFrame] = Field(
@@ -86,6 +95,11 @@ class Generator(XoptBaseModel, ABC):
     def validate_vocs(cls, value: VOCS, info: ValidationInfo):
         if value.n_constraints > 0 and not info.data["supports_constraints"]:
             raise VOCSError("this generator does not support constraints")
+        if (
+            value.n_discrete_variables > 0
+            and not info.data["supports_discrete_variables"]
+        ):
+            raise VOCSError("this generator does not support discrete variables")
         if value.n_objectives == 1:
             if not info.data["supports_single_objective"]:
                 raise VOCSError(
