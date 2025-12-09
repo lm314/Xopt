@@ -61,6 +61,8 @@ class VOCS(XoptBaseModel):
     ----------
     variables : Dict[str, conlist(float, min_length=2, max_length=2)]
         Input variable names with a list of minimum and maximum values.
+    discrete_variables : Dict[str, List[Any]]
+        Discrete variable names with a list of allowed values.
     constraints : Dict[str, conlist(Union[float, ConstraintEnum], min_length=2, max_length=2)]
         Constraint names with a list of constraint type and value.
     objectives : Dict[str, ObjectiveEnum]
@@ -123,6 +125,10 @@ class VOCS(XoptBaseModel):
     observables: list[str] = Field(
         default=[],
         description="observation names tracked alongside objectives and constraints",
+    )
+    discrete_variables: dict[str, list[Any]] = Field(
+        default={},
+        description="discrete variable names with a list of allowed values",
     )
 
     model_config = ConfigDict(
@@ -239,6 +245,26 @@ class VOCS(XoptBaseModel):
 
         return v
 
+    @field_validator("discrete_variables", mode="before")
+    @classmethod
+    def fix_discrete_variables(cls, value: Any) -> dict[str, list[Any]]:
+        if not isinstance(value, dict):
+            raise ValueError("must be a dictionary")
+        for key, val in value.items():
+            if not isinstance(key, str):
+                raise ValueError("discrete variable keys must be strings")
+            if not isinstance(val, list):
+                raise ValueError("discrete variable values must be a list")
+            if len(val) < 1:
+                raise ValueError(
+                    f"discrete variable '{key}' must have at least one value"
+                )
+            if len(set(val)) != len(val):
+                raise ValueError(
+                    f"discrete variable '{key}' contains duplicate values: {val}"
+                )
+        return value
+
     @classmethod
     def from_yaml(cls, yaml_text: str) -> "VOCS":
         """
@@ -286,6 +312,11 @@ class VOCS(XoptBaseModel):
     def variable_names(self) -> list[str]:
         """Returns a sorted list of variable names"""
         return list(sorted(self.variables.keys()))
+
+    @property
+    def discrete_variable_names(self) -> list[str]:
+        """Returns a sorted list of discrete variable names"""
+        return list(sorted(self.discrete_variables.keys()))
 
     @property
     def objective_names(self) -> list[str]:
@@ -336,13 +367,23 @@ class VOCS(XoptBaseModel):
 
     @property
     def all_names(self) -> list[str]:
-        """Returns all vocs names (variables, constants, objectives, constraints)"""
-        return self.variable_names + self.constant_names + self.output_names
+        """Returns all vocs names (variables, discrete variables, constants, objectives, constraints)"""
+        return (
+            self.variable_names
+            + self.discrete_variable_names
+            + self.constant_names
+            + self.output_names
+        )
 
     @property
     def n_variables(self) -> int:
         """Returns the number of variables"""
         return len(self.variables)
+
+    @property
+    def n_discrete_variables(self) -> int:
+        """Returns the number of discrete variables"""
+        return len(self.discrete_variables)
 
     @property
     def n_constants(self) -> int:
@@ -351,8 +392,8 @@ class VOCS(XoptBaseModel):
 
     @property
     def n_inputs(self) -> int:
-        """Returns the number of inputs (variables and constants)"""
-        return self.n_variables + self.n_constants
+        """Returns the number of inputs (variables, discrete variables, and constants)"""
+        return self.n_variables + self.n_discrete_variables + self.n_constants
 
     @property
     def n_objectives(self) -> int:
@@ -390,7 +431,7 @@ class VOCS(XoptBaseModel):
         seed: int | None = None,
     ) -> list[dict]:
         """
-        Uniform sampling of the variables.
+        Uniform sampling of the variables and discrete variables.
 
         Returns a dict of inputs.
 
@@ -415,9 +456,11 @@ class VOCS(XoptBaseModel):
         inputs = {}
         if seed is None:
             rng_sample_function = np.random.random
+            rng_choice_function = np.random.choice
         else:
             rng = np.random.default_rng(seed=seed)
             rng_sample_function = rng.random
+            rng_choice_function = rng.choice
 
         bounds = clip_variable_bounds(self, custom_bounds)
 
@@ -425,6 +468,10 @@ class VOCS(XoptBaseModel):
             a, b = val
             x = rng_sample_function(n)
             inputs[key] = x * a + (1 - x) * b
+
+        # Discrete variables
+        for key, values in self.discrete_variables.items():
+            inputs[key] = rng_choice_function(values, size=n)
 
         # Constants
         if include_constants and self.constants is not None:
@@ -585,6 +632,28 @@ class VOCS(XoptBaseModel):
             The processed dataframe.
         """
         return form_variable_data(self.variables, data, prefix=prefix)
+
+    def discrete_variable_data(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        prefix: str = "discrete_variable_",
+    ) -> pd.DataFrame:
+        """
+        Returns a dataframe containing discrete variables according to `vocs.discrete_variables` in sorted order.
+
+        Parameters
+        ----------
+        data : Union[pd.DataFrame, List[Dict]]
+            The data to be processed.
+        prefix : str, optional
+            Prefix added to column names. Defaults to "discrete_variable_".
+
+        Returns
+        -------
+        pd.DataFrame
+            The processed dataframe.
+        """
+        return form_discrete_variable_data(self.discrete_variables, data, prefix=prefix)
 
     def objective_data(
         self,
@@ -929,6 +998,26 @@ def form_variable_data(
     return vdata
 
 
+def form_discrete_variable_data(
+    discrete_variables: dict, data, prefix="discrete_variable_"
+) -> pd.DataFrame:
+    """
+    Use discrete_variables dict to form a dataframe.
+    """
+    if not discrete_variables:
+        return pd.DataFrame([])
+
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame(data)
+
+    # Pick out columns in right order
+    variables = sorted(discrete_variables)
+    vdata = data.loc[:, variables].copy()
+    # Rename to add prefix
+    vdata = vdata.rename(columns={k: prefix + k for k in variables})
+    return vdata
+
+
 def form_objective_data(
     objectives: dict, data, prefix="objective_", return_raw: bool = False
 ) -> pd.DataFrame:
@@ -1105,6 +1194,7 @@ def form_feasibility_data(constraints: dict, data, prefix="feasible_") -> pd.Dat
 
 
 def validate_input_data(vocs: VOCS, data: pd.DataFrame) -> None:
+    # Validate continuous variables
     variable_data = data.loc[:, vocs.variable_names].values
     bounds = vocs.bounds  # type: ignore
 
@@ -1117,6 +1207,18 @@ def validate_input_data(vocs: VOCS, data: pd.DataFrame) -> None:
         raise ValueError(
             f"input points at indices {np.nonzero(bad_mask.any(axis=0))} are not valid"
         )
+
+    # Validate discrete variables
+    for name in vocs.discrete_variable_names:
+        if name in data:
+            allowed = set(vocs.discrete_variables[name])
+            invalid = ~data[name].isin(allowed)
+            if invalid.any():
+                bad_indices = data.index[invalid].tolist()
+                raise ValueError(
+                    f"Discrete variable '{name}' has invalid values at indices {bad_indices}. "
+                    f"Allowed values: {allowed}. Got: {data.loc[bad_indices, name].tolist()}"
+                )
 
 
 def validate_variable_bounds(variable_dict: dict[str, tuple[float, float]]) -> None:

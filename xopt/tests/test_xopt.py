@@ -261,7 +261,7 @@ class TestXopt:
         assert "Data size: 2" in val
         assert (
             "vocs:\n  constants:\n    constant1: 1.0\n  constraints:\n    c1:\n    - "
-            "GREATER_THAN\n    - 0.5\n  objectives:\n" in val
+            "GREATER_THAN\n    - 0.5\n  discrete_variables: {}\n  objectives:\n" in val
         )
 
     def test_function_checking(self):

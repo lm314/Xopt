@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from xopt.resources.testing import TEST_VOCS_BASE, TEST_VOCS_DATA
+from xopt.resources.testing import TEST_VOCS_BASE, TEST_VOCS_DATA, TEST_VOCS_BASE_MO_DV
 from xopt.vocs import ObjectiveEnum, VOCS
 
 
@@ -302,6 +302,25 @@ class TestVOCS(object):
                 pd.DataFrame({"x1": [-0.5, 2.5], "x2": [1.0, 11.0]})
             )
 
+    def test_validate_discrete_input_data(self):
+        test_vocs = deepcopy(TEST_VOCS_BASE_MO_DV)
+
+        # test good data
+        test_vocs.validate_input_data(
+            pd.DataFrame({"x1": 0.5, "x2": 1.0, "x3": 0.5}, index=[0])
+        )
+
+        # test bad data
+        with pytest.raises(ValueError):
+            test_vocs.validate_input_data(
+                pd.DataFrame({"x1": 0.5, "x2": 11.0, "x3": 0.5}, index=[0])
+            )
+
+        with pytest.raises(ValueError):
+            test_vocs.validate_input_data(
+                pd.DataFrame({"x1": 0.5, "x2": 1.0, "x3": 0.7}, index=[0])
+            )
+
     def test_select_best(self):
         test_data = pd.DataFrame(
             {
@@ -455,3 +474,23 @@ class TestVOCS(object):
         data = vocs.extract_data(test_data)
         assert len(data[0]) == 4
         assert data[2].empty
+
+    def test_discrete_variable_data(self):
+        vocs = VOCS(
+            variables={"x": [0, 1]},
+            discrete_variables={"cat": ["a", "b", "c"]},
+            objectives={"f": "MINIMIZE"},
+        )
+        # Create test data
+        data = pd.DataFrame({"x": [0.1, 0.5, 0.9], "cat": ["a", "b", "c"]})
+        # Test discrete_variable_data method
+        df = vocs.discrete_variable_data(data)
+        assert list(df.columns) == ["discrete_variable_cat"]
+        assert df["discrete_variable_cat"].tolist() == ["a", "b", "c"]
+        # Test with missing column
+        data_missing = pd.DataFrame({"x": [0.1, 0.5, 0.9]})
+        with pytest.raises(KeyError):
+            vocs.discrete_variable_data(data_missing)
+        # Test duplicate values in discrete_variables
+        with pytest.raises(ValidationError):
+            VOCS(variables={"x": [0, 1]}, discrete_variables={"cat": ["a", "a"]})

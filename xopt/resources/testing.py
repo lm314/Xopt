@@ -280,6 +280,10 @@ TEST_VOCS_BASE = VOCS(**TEST_VOCS_BASE_DICT)
 TEST_VOCS_BASE_MO = TEST_VOCS_BASE.model_copy(deep=True)
 TEST_VOCS_BASE_MO.objectives["y2"] = "MINIMIZE"
 
+# Multi-objective VOCS with discrete variables
+TEST_VOCS_BASE_MO_DV = TEST_VOCS_BASE_MO.model_copy(deep=True)
+TEST_VOCS_BASE_MO_DV.discrete_variables = {"x3": [0.0, 0.5, 1.0]}
+
 # Multi-objective VOCS without constraints
 TEST_VOCS_BASE_MO_NC = TEST_VOCS_BASE_MO.model_copy(deep=True)
 TEST_VOCS_BASE_MO_NC.constraints = {}
