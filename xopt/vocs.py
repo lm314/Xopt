@@ -1,6 +1,6 @@
 import warnings
 from enum import Enum
-from typing import Any, Iterable, cast
+from typing import Any, Iterable, Optional, Dict, cast
 
 import numpy as np
 import pandas as pd
@@ -970,6 +970,18 @@ class VOCS(XoptBaseModel):
             [get_opt(feasible_obj_values[: i + 1]) for i in range(len(data))]
         )
         return pd.DataFrame({f"best_{obj_name}": cumulative_optimum}, index=data.index)
+
+    def get_discrete_variable_indices(self) -> Optional[Dict[str, int]]:
+        """get the indices of discrete variables in the vocs variable names"""
+        if self.n_discrete_variables == 0:
+            return None
+
+        indices = dict()
+        for idx, name in enumerate(self.variable_names):
+            if name in self.discrete_variable_names:
+                indices[name] = idx
+
+        return indices
 
 
 # --------------------------------

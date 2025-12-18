@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 import torch
 from botorch.acquisition import AcquisitionFunction
-from botorch.optim import optimize_acqf
+from botorch.optim import optimize_acqf, optimize_acqf_mixed
 from pydantic import Field, PositiveFloat, PositiveInt
 from torch import Tensor
 
@@ -126,6 +126,107 @@ class LBFGSOptimizer(NumericalOptimizer):
         candidates, _ = optimize_acqf(
             acq_function=function,
             bounds=bounds,
+            q=n_candidates,
+            raw_samples=self.n_restarts,
+            num_restarts=self.n_restarts,
+            timeout_sec=max_time,
+            options={"maxiter": self.max_iter},
+            **kwargs,
+        )
+        return candidates
+
+
+class LBFGSMixedOptimizer(NumericalOptimizer):
+    """
+    Same as LBFGSOptimizer but can accept mixed continuous and discrete variables.
+
+    Attributes
+    ----------
+    n_restarts : PositiveInt
+        Number of restarts during acquisition function optimization, default is 20.
+    max_iter : PositiveInt
+        Maximum number of iterations for the optimizer, default is 2000.
+    max_time : Optional[PositiveFloat]
+        Maximum time allowed for optimization, default is None (no time limit).
+
+    Methods
+    -------
+    optimize(function, bounds, n_candidates=1, **kwargs)
+        Optimize the given acquisition function within the specified bounds.
+
+    Parameters
+    ----------
+    function : callable
+        The acquisition function to be optimized.
+    bounds : Tensor
+        The bounds within which to optimize the acquisition function. Must have shape [2, ndim].
+    n_candidates : int, optional
+        Number of candidates to return, default is 1.
+    **kwargs : dict
+        Additional keyword arguments to pass to the optimizer.
+
+    Returns
+    -------
+    candidates : Tensor
+        The optimized candidates.
+    """
+
+    name: str = Field("LBFGSMixed", frozen=True)
+    n_restarts: PositiveInt = Field(
+        20, description="number of restarts during acquisition function optimization"
+    )
+    max_iter: PositiveInt = Field(
+        2000, description="maximum number of optimization steps"
+    )
+    max_time: Optional[PositiveFloat] = Field(
+        5.0, description="maximum time for optimization in seconds"
+    )
+
+    def optimize(
+        self,
+        function: AcquisitionFunction,
+        bounds: Tensor,
+        fixed_features_list: list[dict[int, float]] = [],
+        n_candidates: int = 1,
+        **kwargs: Any,
+    ):
+        """
+        Optimize the given acquisition function within the specified bounds.
+
+        Parameters
+        ----------
+        function : Callable
+            The acquisition function to be optimized.
+        bounds : Tensor
+            A tensor specifying the bounds for the optimization. It must have the shape [2, ndim].
+        fixed_features_list : list of dict
+            A list of dictionaries specifying fixed features index and correpsonding feature values for mixed optimization.
+        n_candidates : int, optional
+            The number of candidates to generate (default is 1).
+        **kwargs : dict
+            Additional keyword arguments to be passed to the acquisition function optimizer.
+
+        Returns
+        -------
+        candidates : Tensor
+            The optimized candidates.
+        """
+
+        assert isinstance(bounds, Tensor)
+        if len(bounds) != 2:
+            raise ValueError("bounds must have the shape [2, ndim]")
+
+        # emperical testing showed that the max time is overrun slightly on the botorch side
+        # fix by slightly reducing the max time passed to this function
+        if self.max_time is not None:
+            max_time = self.max_time * 0.8 - 0.01
+        else:
+            max_time = None
+
+        candidates, _ = optimize_acqf_mixed(
+            acq_function=function,
+            bounds=bounds,
+            fixed_features_list=fixed_features_list,
             q=n_candidates,
             raw_samples=self.n_restarts,
             num_restarts=self.n_restarts,

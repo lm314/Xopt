@@ -17,6 +17,7 @@ from xopt.generators.bayesian.custom_botorch.constrained_acquisition import (
 from xopt.generators.bayesian.custom_botorch.multi_fidelity import NMOMF
 from xopt.generators.bayesian.mobo import MOBOGenerator
 from xopt.vocs import ObjectiveEnum, VOCS
+from xopt.numerical_optimizer import LBFGSMixedOptimizer
 
 logger = logging.getLogger()
 
@@ -321,3 +322,67 @@ class MultiFidelityGenerator(MOBOGenerator):
         df[self.fidelity_parameter] = 1.0
 
         return self.vocs.convert_dataframe_to_inputs(df)
+
+
+class MultiFidelityDiscreteGenerator(MultiFidelityGenerator):
+    """
+    Multi-fidelity Bayesian generator that supports discrete variables.
+    Inherits from MultiFidelityGenerator and adds support for discrete variables.
+    Uses the propose_candidates method from BayesianGenerator.
+    """
+
+    supports_discrete_variables: bool = True
+
+    # Explicitly override the default numerical_optimizer for this class with type annotation for Pydantic
+    numerical_optimizer: LBFGSMixedOptimizer = LBFGSMixedOptimizer()
+
+    def _get_discrete_variables_list(self) -> list[dict[int, float]]:
+        """
+        Get a list of fixed features for discrete variables.
+
+        Returns
+        -------
+        list of dict
+            A list of dictionaries specifying fixed features index and corresponding feature values.
+        """
+        discrete_variable_list = []
+        discrete_vars = self.vocs.get_discrete_variable_indices()
+        if discrete_vars:
+            for name, index in discrete_vars.items():
+                discrete_vals = self.vocs.discrete_variables[name]
+                for val in discrete_vals:
+                    discrete_variable_list.append({index: val})
+        else:
+            discrete_variable_list.append({})  # No discrete variables, empty dict
+
+        return discrete_variable_list
+
+    def propose_candidates(self, model, n_candidates: int = 1):
+        # ...modified existing code from BayesianGenerator.propose_candidates...
+        # update TurBO state if used with the last `n_candidates` points
+        if self.turbo_controller is not None:
+            self.turbo_controller.update_state(self, n_candidates)
+
+        # calculate optimization bounds
+        bounds = self._get_optimization_bounds()
+
+        # get list of fixed features and allowed values
+        discrete_variables_list = self._get_discrete_variables_list()
+
+        # get acquisition function
+        acq_funct = self.get_acquisition(model)
+
+        # get initial candidates to start acquisition function optimization
+        initial_points = self._get_initial_conditions(n_candidates)
+
+        # get candidates
+        if isinstance(self.numerical_optimizer, LBFGSMixedOptimizer):
+            candidates = self.numerical_optimizer.optimize(
+                acq_funct,
+                bounds,
+                discrete_variables_list,
+                n_candidates,
+                batch_initial_conditions=initial_points,
+            )
+
+        return candidates

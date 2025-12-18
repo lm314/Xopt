@@ -879,6 +879,15 @@ class BayesianGenerator(Generator, ABC):
                 if name not in self.fixed_features:
                     indices += [idx]
 
+            # if discrete variables key is in vocs then we need to remove the bounds
+            # associated with that key
+            # if self.vocs.discrete_variables is not None:
+            #     # grab variable name indices that are NOT in fixed features
+            #     indices = []
+            #     for idx, name in enumerate(self.vocs.variable_names):
+            #         if name not in self.vocs.discrete_variable_names:
+            #             indices += [idx]
+
             # grab indexed bounds
             bounds = bounds[:, indices]
 

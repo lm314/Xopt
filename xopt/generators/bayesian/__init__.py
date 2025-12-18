@@ -5,6 +5,7 @@ from xopt.generators.bayesian.expected_improvement import (
 )
 from xopt.generators.bayesian.mobo import MOBOGenerator
 from xopt.generators.bayesian.multi_fidelity import MultiFidelityGenerator
+from xopt.generators.bayesian.multi_fidelity import MultiFidelityDiscreteGenerator
 from xopt.generators.bayesian.upper_confidence_bound import (
     TDUpperConfidenceBoundGenerator,
     UpperConfidenceBoundGenerator,
@@ -17,6 +18,7 @@ __all__ = [
     "UpperConfidenceBoundGenerator",
     "ExpectedImprovementGenerator",
     "MultiFidelityGenerator",
+    "MultiFidelityDiscreteGenerator",
     "TDUpperConfidenceBoundGenerator",
     "TDExpectedImprovementGenerator",
 ]
