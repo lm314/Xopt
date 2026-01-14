@@ -9,6 +9,13 @@ from botorch.acquisition import (
     GenericMCObjective,
     qUpperConfidenceBound,
 )
+from botorch.optim.optimize import optimize_acqf
+from botorch.acquisition.multi_objective.hypervolume_knowledge_gradient import (
+    _get_hv_value_function,
+    qMultiFidelityHypervolumeKnowledgeGradient,
+)
+from botorch.sampling.normal import SobolQMCNormalSampler
+from botorch.models.gp_regression_fidelity import SingleTaskMultiFidelityGP
 from pydantic import Field, field_validator
 
 from xopt.generators.bayesian.custom_botorch.constrained_acquisition import (
@@ -358,8 +365,7 @@ class MultiFidelityDiscreteGenerator(MultiFidelityGenerator):
         return discrete_variable_list
 
     def propose_candidates(self, model, n_candidates: int = 1):
-        # ...modified existing code from BayesianGenerator.propose_candidates...
-        # update TurBO state if used with the last `n_candidates` points
+        # modified existing code from BayesianGenerator.propose_candidates
         if self.turbo_controller is not None:
             self.turbo_controller.update_state(self, n_candidates)
 
@@ -386,3 +392,187 @@ class MultiFidelityDiscreteGenerator(MultiFidelityGenerator):
             )
 
         return candidates
+
+
+class MFHVKGWrapped(qMultiFidelityHypervolumeKnowledgeGradient):
+    """
+    Wrapper around qMultiFidelityHypervolumeKnowledgeGradient that
+    makes it behave t-batch-wise for Xopt / optimize_acqf_mixed.
+
+    Parameters
+    ----------
+    X : torch.Tensor
+        Input tensor of shape (t_batch, q, d).
+    Returns
+    -------
+    torch.Tensor
+        quantifies the acquisition value for each t-batch.
+
+    """
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        # Handle the common case: X has a t-batch dimension
+        if X.dim() == 3:
+            t_batch = X.shape[0]
+            vals = []
+
+            # Call the *undecorated* base forward once per t-batch row
+            base_forward = (
+                qMultiFidelityHypervolumeKnowledgeGradient.forward.__wrapped__
+            )
+
+            for i in range(t_batch):
+                Xi = X[i : i + 1]  # shape (1, q, d)
+                vi = base_forward(self, Xi)  # shape (1,) from MF-HVKG
+                vals.append(vi.squeeze(-1))  # -> scalar
+
+            return torch.stack(vals, dim=0)  # (t_batch,)
+
+        # Fallback: no t-batch, just call the undecorated base
+        base_forward = qMultiFidelityHypervolumeKnowledgeGradient.forward.__wrapped__
+        return base_forward(self, X)
+
+
+class MultiFidelityHVKGDiscreteGenerator(MultiFidelityDiscreteGenerator):
+    """
+    Multi-fidelity Bayesian generator using Multi-Fidelity Hypervolume Knowledge Gradient (MF-HVKG)
+    with discrete variable support.
+
+    - Standard MF-HVKG by default (no cost awareness).
+    - Becomes cost-aware only if `cost_function` is explicitly provided.
+    """
+
+    # Override inherited default so MF-HVKG is standard unless user opts in
+    cost_function: Optional[Callable] = None
+
+    # Explicitly override the default numerical_optimizer for this class
+    numerical_optimizer: LBFGSMixedOptimizer = LBFGSMixedOptimizer()
+
+    def build_model(
+        self,
+        input_names,
+        outcome_names,
+        data,
+        input_bounds=None,
+        dtype: torch.dtype = torch.double,
+        device: str = "cpu",
+    ):
+        """
+        Build and return a SingleTaskMultiFidelityGP model for multi-fidelity optimization.
+        """
+        X = torch.tensor(data[input_names].values, dtype=dtype, device=device)
+        Y = torch.tensor(data[outcome_names].values, dtype=dtype, device=device)
+
+        fidelity_features = [self.fidelity_variable_index]
+
+        return SingleTaskMultiFidelityGP(
+            X,
+            Y,
+            fidelity_features=fidelity_features,
+        )
+
+    def get_acquisition(self, model: torch.nn.Module):
+        """
+        Get the Multi-Fidelity Knowledge Gradient acquisition function for Bayesian Optimization.
+        """
+        if model is None:
+            raise ValueError("model cannot be None")
+        return self._get_acquisition(model)
+
+    def _compute_current_value(self, model: torch.nn.Module) -> torch.Tensor:
+        """Helper to get the hypervolume of the current hypervolume
+        maximizing set.
+        """
+
+        fid_idx = self.fidelity_variable_index
+        max_fidelity = self.vocs.variables[self.fidelity_parameter][-1]
+
+        # create helper function for hypervolume calculation at max fidelity
+        curr_val_acqf = FixedFeatureAcquisitionFunction(
+            acq_function=_get_hv_value_function(
+                model=model,
+                ref_point=self.torch_reference_point,
+                sampler=SobolQMCNormalSampler(
+                    sample_shape=torch.Size([32]),
+                ),
+                use_posterior_mean=True,
+            ),
+            d=self.vocs.n_variables,
+            columns=[fid_idx],
+            values=[max_fidelity],
+        )
+
+        # Get bounds and remove the fidelity dimension
+        #    self._get_bounds() returns a (2, d) tensor
+        bounds = self._get_bounds()
+        boundst = bounds.T  # (d, 2)
+        bounds_no_fid = torch.cat(
+            (boundst[:fid_idx], boundst[fid_idx + 1 :]), dim=0
+        ).T  # (2, d-1)
+
+        # Optimize max fidelity hypervolume over remaining variables
+        _, current_value = optimize_acqf(
+            acq_function=curr_val_acqf,
+            bounds=bounds_no_fid,
+            q=1,
+            num_restarts=10,
+            raw_samples=256,
+            return_best_only=True,
+            options={
+                "nonnegative": True,
+                "maxiter": 200,
+            },
+        )
+
+        # current_value has shape (1,); squeeze to scalar
+        return current_value.squeeze()
+
+    def _get_acquisition(self, model: torch.nn.Module):
+        """
+        Create the Multi-Fidelity Knowledge Gradient acquisition function.
+
+        Steps:
+        - Compute the current best value at the highest fidelity (by optimizing posterior mean).
+        - Build a projection to the target fidelity (max fidelity from VOCS).
+        - Wrap cost_function only if explicitly provided.
+        - Construct MFKGWrapped (MF-KG with proper BoTorch transform).
+        """
+        fid_idx = self.fidelity_variable_index
+
+        # Compute current best at target fidelity via optimization
+        current_value = self._compute_current_value(model)
+
+        # Build project() function to map any X to max fidelity
+        max_fidelity = self.vocs.variables[self.fidelity_parameter][-1]
+
+        def project_to_target_fidelity(X: torch.Tensor) -> torch.Tensor:
+            X_proj = X.clone()
+            X_proj[..., fid_idx] = max_fidelity
+            return X_proj
+
+        # Build cost-aware utility only if cost_function is provided
+        if self.cost_function is None:
+            cost_utility = None
+        else:
+
+            def cost_utility(
+                X: torch.Tensor, deltas: torch.Tensor = None, **kwargs
+            ) -> torch.Tensor:
+                # cost depends only on fidelity coordinate
+                # return self.cost_function(X[..., fid_idx])
+                s = X[:, 0, fid_idx]  # shape (t_batch,)
+                return self.cost_function(s).unsqueeze(-1)
+
+        # Construct MF-HVKG acquisition function
+        acq_func = MFHVKGWrapped(
+            model=model,
+            ref_point=self.torch_reference_point,
+            num_fantasies=2,
+            num_pareto=1,
+            current_value=current_value,
+            cost_aware_utility=cost_utility,
+            target_fidelities={fid_idx: max_fidelity},
+            project=project_to_target_fidelity,
+        )
+
+        return acq_func
