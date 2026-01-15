@@ -96,7 +96,7 @@ class BayesianGenerator(Generator, ABC):
     numerical_optimizer : SerializeAsAny[NumericalOptimizer]
         The optimizer used to optimize the acquisition function in Bayesian Optimization.
 
-    max_travel_distances : Optional[List[float]]
+    max_travel_distances : Optional[Union[List[float], Dict[str, float]]]
         The limits for travel distances between points in normalized space.
 
     fixed_features : Optional[Dict[str, float]]
@@ -152,9 +152,9 @@ class BayesianGenerator(Generator, ABC):
         LBFGSOptimizer(),
         description="optimizer used to optimize the acquisition function",
     )
-    max_travel_distances: Optional[List[float]] = Field(
+    max_travel_distances: Optional[Union[List[float], Dict[str, float]]] = Field(
         None,
-        description="limits for travel distance between points in normalized space",
+        description="limits for travel distance between points in normalized space; can be a list (ordered by vocs.variable_names) or a dict (keys are variable names)",
     )
     fixed_features: Optional[Dict[str, float]] = Field(
         None, description="fixed features used in Bayesian optimization"
@@ -921,12 +921,19 @@ class BayesianGenerator(Generator, ABC):
         -----
         This method calculates the region in which the next candidates for
         optimization should be generated based on the maximum travel distances
-        specified. The region is centered around the last observation in the
-        optimization space. The `max_travel_distances` parameter should be a list of
-        maximum travel distances for each variable.
-
+        specified. The `max_travel_distances` parameter can be a list (ordered by
+        vocs.variable_names) or a dictionary (keys are variable names).
+        The region is centered around the last observation in the optimization space.
         """
-        if len(self.max_travel_distances) != bounds.shape[-1]:
+        # Support both list and dict for max_travel_distances
+        if isinstance(self.max_travel_distances, dict):
+            # Map dict to list in order of vocs.variable_names
+            max_travel_list = [
+                self.max_travel_distances[name] for name in self.vocs.variable_names
+            ]
+        else:
+            max_travel_list = self.max_travel_distances
+        if len(max_travel_list) != bounds.shape[-1]:
             raise ValueError(
                 f"length of max_travel_distances must match the number of "
                 f"variables {bounds.shape[-1]}"
@@ -943,14 +950,11 @@ class BayesianGenerator(Generator, ABC):
         # bound lengths based on vocs for normalization
         vocs_bounds = self.vocs.bounds
         lengths = vocs_bounds[1, :] - vocs_bounds[0, :]
-
         # get maximum travel distances
-        max_travel_distances = np.array(self.max_travel_distances) * lengths
-
+        max_travel_distances = np.array(max_travel_list) * lengths
         max_travel_bounds = np.stack(
             (last_point - max_travel_distances, last_point + max_travel_distances)
         )
-
         return torch.tensor(max_travel_bounds)
 
 
